@@ -1,0 +1,123 @@
+services:
+  sales-db:
+    image: postgres:16
+    container_name: sales-db
+    environment:
+      POSTGRES_DB: sales
+      POSTGRES_USER: sales
+      POSTGRES_PASSWORD: sales
+    ports:
+      - "5432:5432"
+    volumes:
+      - sales_db_data:/var/lib/postgresql/data
+      - ./sql/init_sales.sql:/docker-entrypoint-initdb.d/init_sales.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales -d sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  airflow-db:
+    image: postgres:16
+    container_name: airflow-db
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  airflow-init:
+    image: apache/airflow:2.9.3
+    container_name: airflow-init
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres==5.12.0 psycopg2-binary==2.9.9"
+      AIRFLOW_CONN_SALES_POSTGRES: postgresql://sales:sales@sales-db:5432/sales
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: >
+      bash -lc "set -e; airflow db migrate && airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}"
+
+  airflow-webserver:
+    image: apache/airflow:2.9.3
+    container_name: airflow-webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      sales-db:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres==5.12.0 psycopg2-binary==2.9.9"
+      AIRFLOW_CONN_SALES_POSTGRES: postgresql://sales:sales@sales-db:5432/sales
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.3
+    container_name: airflow-scheduler
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+      sales-db:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres==5.12.0 psycopg2-binary==2.9.9"
+      AIRFLOW_CONN_SALES_POSTGRES: postgresql://sales:sales@sales-db:5432/sales
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: scheduler
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    depends_on:
+      sales-db:
+        condition: service_healthy
+    ports:
+      - "${METABASE_PORT}:3000"
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    volumes:
+      - metabase_data:/metabase-data
+
+  order-generator:
+    build: ./generator
+    container_name: order-generator
+    depends_on:
+      sales-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: sales-db
+      DB_PORT: "5432"
+      DB_NAME: sales
+      DB_USER: sales
+      DB_PASSWORD: sales
+      RATE_SECONDS: "10"
+    restart: unless-stopped
+
+volumes:
+  sales_db_data:
+  airflow_db_data:
+  metabase_data:
